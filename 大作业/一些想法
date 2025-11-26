@@ -1,0 +1,35 @@
+我该怎么定义一个项目执行的好坏，以此来进行分类。
+来自gemini 利用预算执行度，即 Budget_Utilization_Ratio = project_expenditure_amount / project_budget_amount
+2.建立一个影响力框架
+猜想，先分类，在根据对应类别分割词汇，配合不同的prompt送给llm进行生成。
+限制：数据集中对应资料过少，能使用的资源有限。
+
+对合作关系栏的利用：
+使用异构图，将合作关系作为边，项目作为节点，进行分类。
+
+对每个项目的描述，
+title_en：项目标题 。   
+
+description_en：项目描述。这是 NLP任务中最重要的输入特征 。   
+
+outcome_title_en, output_title_en：对预期结果的文本描述 
+secotr
+根据这些模块做预训练，将一个项目打上不同的标签。（使用bert技术）
+然后做一个类似搜索引擎的模块，输入我对一个项目口语化的描述，输出所有可能对应的项目，为后期可视化做准备。（语义分析引擎）
+
+利用上述提到的语料库，
+
+NLP特征： description_en 的768维语义嵌入。
+
+结构化特征： project_budget_amount (对数转换后)、funding_type (独热编码)、sector (独热编码)。 这些是特征。
+预算使用率 作为标签进行有监督的机器学习，即能用于预测哪些正在执行的项目的成功率，也能从模型参数中得到哪些方面的项目成功率低，急需进一步努力。
+
+讲donor作为主题，既可以看各个国家捐赠总额排名的柱状图，也可以看每个国家不同项目占比的饼状图
+
+可视化部分
+分很多小点，尽量做的美观一点，动效流畅一点。
+
+
+我负责第一部分 原先使用的bert模型，后来考虑到需求，使用了经过蒸馏的sentence-transformers/multilingual-MiniLM-L6-v2模型。
+后来发现hugging face上没有这个模型，只有sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2模型。
+效果很一般，等明天早上起来对token构建部分进行一些修改。
