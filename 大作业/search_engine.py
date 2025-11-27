@@ -11,16 +11,17 @@ import json
 import numpy as np
 from typing import List, Dict, Any, Tuple
 from collections import Counter
+import jieba
 #使用国内的镜像hugging face网站
 #国内的也炸了，迫不得已上梯子
 
 
 # 导入sentence-transformers库
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, util
 
 class SearchEngine:
     """搜索引擎核心类"""
-    
+    #可使用本地模型，只需将str替换即可def __init__(self, model_name: str = '/Users/wanglijiahang/Downloads/大作业/local_model'):，默认是联网的
     def __init__(self, model_name: str = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'):
         """
         初始化搜索引擎
@@ -98,11 +99,16 @@ class SearchEngine:
             doc_id = record['id']
             text = record['raw_text']
             
-            # 简单分词
-            words = set(text.split())
+            # 使用jieba分词，支持中英文混合分词
+            words = set(jieba.cut(text))
+            
+            # 同时保留英文单词的split分词（处理连续英文）
+            words.update(text.split())
             
             for word in words:
-                if len(word) <= 2:
+                # 移除空格和空字符串
+                word = word.strip()
+                if not word or len(word) <= 1:  # 调整阈值以保留更多有意义的中文单字词
                     continue
                 
                 if word not in keyword_index:
@@ -146,15 +152,15 @@ class SearchEngine:
         
         return query
     
-    def expand_query(self, query: str) -> List[str]:
+    def expand_query(self, query: str) -> str:
         """
-        查询扩展，处理口语化表达
+        查询扩展，将相关术语作为补充上下文添加到原始查询中
         
         Args:
             query: 清洗后的查询
             
         Returns:
-            扩展后的查询列表
+            扩展后的上下文文本
         """
         # 常见口语表达映射到正式术语
         expansions = {
@@ -247,14 +253,23 @@ class SearchEngine:
     ]
 }
         
-        expanded_queries = [query]  # 保留原始查询
+        # 基础查询始终保留
+        expanded_context = [query]
+        
+        # 收集扩展术语，但限制数量以避免噪音过大
+        collected_terms = set()
         
         # 检查是否包含中文关键词需要扩展
         for chinese_term, english_terms in expansions.items():
             if chinese_term in query:
-                expanded_queries.extend(english_terms)
+                # 只添加相关的核心术语（限制数量）
+                for term in english_terms[:5]:  # 只取前5个最相关的术语
+                    if term not in collected_terms:
+                        collected_terms.add(term)
+                        expanded_context.append(term)
         
-        return expanded_queries
+        # 将扩展后的上下文连接成一个文本
+        return " ".join(expanded_context)
     
     def _calculate_similarity(self, query_vector: np.ndarray) -> List[Tuple[int, float]]:
         """
@@ -266,29 +281,20 @@ class SearchEngine:
         Returns:
             文档ID和相似度分数的列表
         """
-        similarities = []
-        
-        # 计算余弦相似度
+        # 使用sentence-transformers的util.cos_sim进行高效的矩阵计算
         if len(query_vector.shape) == 1:
             query_vector = query_vector.reshape(1, -1)
         
-        for i, doc_vector in enumerate(self.document_vectors):
-            # 归一化向量
-            doc_norm = np.linalg.norm(doc_vector)
-            query_norm = np.linalg.norm(query_vector)
-            
-            if doc_norm > 0 and query_norm > 0:
-                # 余弦相似度
-                similarity = np.dot(doc_vector, query_vector[0]) / (doc_norm * query_norm)
-            else:
-                similarity = 0
-            
-            similarities.append((i, similarity))
+        # 计算所有文档向量与查询向量的余弦相似度（矩阵运算，速度极快）
+        similarities = util.cos_sim(query_vector, self.document_vectors)[0]
+        
+        # 转换为(索引, 分数)的列表
+        similarities_list = [(i, similarities[i].item()) for i in range(len(similarities))]
         
         # 按相似度降序排序
-        similarities.sort(key=lambda x: x[1], reverse=True)
+        similarities_list.sort(key=lambda x: x[1], reverse=True)
         
-        return similarities
+        return similarities_list
     
     def keyword_search(self, query: str, top_k: int = 50) -> Dict[int, float]:
         """
@@ -302,13 +308,23 @@ class SearchEngine:
             文档ID到相关性分数的映射
         """
         cleaned_query = self.clean_query(query)
-        query_words = set(cleaned_query.split())
+        
+        # 使用jieba分词查询文本，支持中英文混合查询
+        query_words = set(jieba.cut(cleaned_query))
+        
+        # 同时保留英文单词的split分词
+        query_words.update(cleaned_query.split())
         
         # 计算文档匹配分数
         doc_scores = Counter()
         
         for word in query_words:
-            if len(word) > 2 and word in self.keyword_index:
+            # 移除空格和空字符串
+            word = word.strip()
+            if not word or len(word) <= 1:
+                continue
+                
+            if word in self.keyword_index:
                 # 为包含该词的文档加分
                 for doc_id in self.keyword_index[word]:
                     doc_scores[doc_id] += 1
@@ -344,65 +360,91 @@ class SearchEngine:
         # 返回前k个结果
         return similarities[:top_k]
     
-    def search(self, query: str, top_k: int = 10, hybrid_weight: float = 0.7) -> List[Dict[str, Any]]:
+    def search(self, query: str, top_k: int = 10, rrf_k: int = 60) -> List[Dict[str, Any]]:
         """
-        混合搜索（语义搜索 + 关键词搜索）
+        混合搜索（语义搜索 + 关键词搜索），使用RRF算法融合结果
         
         Args:
             query: 查询文本
             top_k: 返回前k个结果
-            hybrid_weight: 语义搜索权重 (0-1)
+            rrf_k: RRF常数，默认60
             
         Returns:
             搜索结果列表
         """
         print(f"搜索查询: '{query}'")
         
-        # 扩展查询
-        expanded_queries = self.expand_query(query)
+        # 清洗查询
+        cleaned_query = self.clean_query(query)
         
-        # 语义搜索分数
+        # 获取扩展上下文
+        expanded_context = self.expand_query(cleaned_query)
+        
+        # 语义搜索：使用扩展上下文进行单次搜索，获取更多结果用于RRF
+        semantic_results = self.semantic_search(expanded_context, top_k=top_k*2)
         semantic_scores = {}
-        for expanded_query in expanded_queries:
-            results = self.semantic_search(expanded_query, top_k=100)
-            for doc_idx, score in results:
-                doc_id = self.processed_data[doc_idx]['id']
-                if doc_id not in semantic_scores or score > semantic_scores[doc_id]:
-                    semantic_scores[doc_id] = score
+        for doc_idx, score in semantic_results:
+            doc_id = self.processed_data[doc_idx]['id']
+            semantic_scores[doc_id] = score
         
-        # 关键词搜索分数
-        keyword_scores = {}
-        for expanded_query in expanded_queries:
-            results = self.keyword_search(expanded_query, top_k=100)
-            for doc_id, score in results.items():
-                if doc_id not in keyword_scores or score > keyword_scores[doc_id]:
-                    keyword_scores[doc_id] = score
+        # 关键词搜索：使用原始查询进行搜索，获取更多结果用于RRF
+        # 1. 原始查询的关键词搜索
+        keyword_scores = self.keyword_search(cleaned_query, top_k=top_k*2)
         
-        # 合并分数
+        # 2. 如果查询中有特定术语，为相关关键词增加权重
+        expanded_terms = expanded_context.split()
+        # 提取扩展术语中的核心词（排除原始查询词）
+        query_terms = set(cleaned_query.split())
+        additional_terms = [term for term in expanded_terms if term.lower() not in query_terms]
+        
+        # 为包含额外术语的文档增加权重
+        for term in additional_terms:
+            term = term.strip().lower()
+            if term in self.keyword_index:
+                for doc_id in self.keyword_index[term]:
+                    # 增加权重但保持在合理范围内
+                    if doc_id in keyword_scores:
+                        keyword_scores[doc_id] = min(1.0, keyword_scores[doc_id] * 1.2)
+        
+        # 为语义搜索结果构建排名映射
+        semantic_ranks = {}
+        for rank, (doc_id, _) in enumerate(sorted(semantic_scores.items(), key=lambda x: x[1], reverse=True)):
+            semantic_ranks[doc_id] = rank + 1  # 排名从1开始
+        
+        # 为关键词搜索结果构建排名映射
+        keyword_ranks = {}
+        for rank, (doc_id, _) in enumerate(sorted(keyword_scores.items(), key=lambda x: x[1], reverse=True)):
+            keyword_ranks[doc_id] = rank + 1  # 排名从1开始
+        
+        # 应用RRF算法融合结果
+        rrf_scores = {}
+        
+        # 确保两个结果集的文档ID都被考虑
         all_doc_ids = set(semantic_scores.keys()) | set(keyword_scores.keys())
-        combined_scores = {}
         
         for doc_id in all_doc_ids:
-            s_score = semantic_scores.get(doc_id, 0)
-            k_score = keyword_scores.get(doc_id, 0)
+            # 获取文档在语义搜索中的排名（如果没有则排名为无穷大）
+            semantic_rank = semantic_ranks.get(doc_id, float('inf'))
             
-            # 混合分数计算
-            if s_score > 0 and k_score > 0:
-                # 当两种搜索都有结果时，使用加权平均
-                combined_score = hybrid_weight * s_score + (1 - hybrid_weight) * k_score
-            elif s_score > 0:
-                combined_score = s_score * 0.9  # 降低纯语义搜索的置信度
-            else:
-                combined_score = k_score * 0.8  # 降低纯关键词搜索的置信度
+            # 获取文档在关键词搜索中的排名（如果没有则排名为无穷大）
+            keyword_rank = keyword_ranks.get(doc_id, float('inf'))
             
-            combined_scores[doc_id] = combined_score
+            # 计算RRF分数: 1/(k + rank)
+            rrf_score = 0
+            if semantic_rank != float('inf'):
+                rrf_score += 1 / (rrf_k + semantic_rank)
+            if keyword_rank != float('inf'):
+                rrf_score += 1 / (rrf_k + keyword_rank)
+            
+            # 保存RRF分数
+            rrf_scores[doc_id] = rrf_score
         
-        # 按分数排序
-        sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
+        # 按RRF分数降序排序
+        sorted_results = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
         
         # 构建最终结果
         final_results = []
-        for doc_id, score in sorted_results[:top_k]:
+        for doc_id, rrf_score in sorted_results[:top_k]:
             # 查找文档索引
             doc_idx = None
             for i, record in enumerate(self.processed_data):
@@ -414,7 +456,7 @@ class SearchEngine:
                 record = self.processed_data[doc_idx]
                 result = {
                     'id': doc_id,
-                    'score': score,
+                    'score': rrf_score,
                     'project': record['original_row']['Project'],
                     'description': record['original_row']['Description'],
                     'sector': record['original_row'].get('Sector', ''),

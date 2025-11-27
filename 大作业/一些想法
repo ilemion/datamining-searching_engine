@@ -32,4 +32,5 @@ NLP特征： description_en 的768维语义嵌入。
 
 我负责第一部分 原先使用的bert模型，后来考虑到需求，使用了经过蒸馏的sentence-transformers/multilingual-MiniLM-L6-v2模型。
 后来发现hugging face上没有这个模型，只有sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2模型。
-效果很一般，等明天早上起来对token构建部分进行一些修改。
+效果很一般，等明天早上起来对token构建部分进行一些修改。11.26
+修改完成：饮用jieba库处理中文词组，改进了查询扩展策略现在能正常使用了。11.27
