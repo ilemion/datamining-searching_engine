@@ -215,7 +215,7 @@ class SearchCLI:
         
         try:
             # 执行搜索
-            results = self.engine.search(query, top_k=top_k, hybrid_weight=self.hybrid_weight)
+            results = self.engine.search(query, top_k=top_k)
             
             # 计算搜索时间
             search_time = time.time() - start_time
